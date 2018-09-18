@@ -1,0 +1,15 @@
+[package]
+name = "email_addr_spec"
+version = "0.1.0"
+authors = ["YetAnotherMinion <yam@thinkalexandria.com>"]
+description = "Parse, validate, and canonicalize email addresses according to RFC 5322"
+repository = "https://github.com/ThinkAlexandria/email_addr_spec"
+documentation = "https:/docs.rs/email_addr_spec"
+license = "MIT OR Apache-2.0"
+categories = ["email"]
+keywords = [ "email", "rfc5322" ]
+
+[dependencies]
+
+[build-dependencies]
+peg = { version = "0.5" }

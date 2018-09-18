@@ -1,0 +1,390 @@
+// Copyright 2018 Th!nk Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// 	http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// The MIT License (MIT)
+//
+// Copyright (c) 2018 Th!nk Inc.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+
+pub addr_spec -> (Vec<AST<'input>>, Vec<AST<'input>>)
+    = l:local_part "@" d:domain
+    { (l, d) }
+
+local_part -> Vec<AST<'input>>
+    = dot_atom
+    / quoted_string
+    / obs_local_part
+
+domain -> Vec<AST<'input>>
+    = dot_atom
+    / domain_literal
+    / obs_domain
+
+domain_literal -> Vec<AST<'input>>
+    = head:CFWS? open:$("[") inner:domain_literal_inner* trailing_ws:FWS? close:$("]") tail:CFWS?
+    {
+        let mut result = head.unwrap_or(Vec::new());
+        result.push(AST::Atom(open));
+        // flatten Vec<Vec<AST<'input>>> from domain_literal_inner
+        for mut v in inner.into_iter() {
+            result.append(&mut v);
+        }
+        if let Some(mut trailing_ws) = trailing_ws {
+            result.append(&mut trailing_ws);
+        }
+        result.push(AST::Atom(close));
+        if let Some(mut tail) = tail {
+            result.append(&mut tail);
+        }
+        result
+    }
+
+domain_literal_inner -> Vec<AST<'input>>
+    // NOTE: to be strict, we should return only one character at a time. As a
+    // performance optimization, glob multiple characters at a time. If
+    // strictness is more important, remove the +
+    = head:FWS? tail:$(dtext+)
+    {
+        let mut result = head.unwrap_or(Vec::new());
+        result.push(AST::Atom(tail));
+        result 
+    }
+
+
+dtext
+    = [\x21-\x5a] // Printable US-ASCII
+    / [x5e-\x7e] // characters not including "[", "]", or "\"
+
+////// 3.2.1 Quoted characters
+
+quoted_pair -> AST<'input>
+    = quoted_pair_inner / obs_qp
+
+quoted_pair_inner -> AST<'input>
+    = "\\" a:$(quoted_pair_helper)
+    { AST::QuotedPair(a) }
+
+quoted_pair_helper = VCHAR / WSP
+
+////// 3.2.2 Folding White Space and Comments
+
+FWS -> Vec<AST<'input>>
+    = new_FWS / obs_FWS / #expected("folding whitespace")
+
+new_FWS -> Vec<AST<'input>>
+    = head:new_FWS_helper? white_space:$(WSP+)
+    {
+        let mut head = head.unwrap_or(vec![]);
+        head.push(AST::WhiteSpace(white_space));
+        head
+    }
+
+new_FWS_helper -> Vec<AST<'input>>
+    = white_space:$(WSP*) fold:$(CRLF)
+    {
+        if white_space.len() > 0 {
+            vec![AST::WhiteSpace(white_space), AST::Fold(fold)]
+        } else {
+            vec![AST::Fold(fold)]
+        }
+    }
+
+// printable US-ASCII characters not including "(", ")", or "\"
+ctext -> AST<'input>
+    // NOTE: to be strict, we should return only one character at a time. As a
+    // performance optimization, glob multiple characters at a time. If
+    // strictness is more important, remove the +
+    = ctext:$(ctext_helper+)
+    {
+        AST::Atom(ctext)
+    }
+
+ctext_helper
+    = [\x21-\x27]
+    / [\x2a-\x5b]
+    / [\x5d-\x7e]
+    / obs_ctext
+
+
+ccontent -> AST<'input>
+    = ctext
+    / quoted_pair
+    / comment
+
+// TODO make quoted_pair return a AST::QuotedPair, make ctext return AST::Atom
+
+// We always ignore comments when building the AST
+comment -> AST<'input>
+    = "(" head:comment_helper* tail:FWS? ")"
+    {
+        let mut result = Vec::with_capacity(head.len());
+        // flatten Vec<Vec<AST<'input>>> from comment_helper
+        for mut v in head.into_iter() {
+            result.append(&mut v);
+        }
+        if let Some(mut tail) = tail {
+            result.append(&mut tail);
+        }
+        AST::Comment(result)
+    }
+
+comment_helper -> Vec<AST<'input>>
+    = a:FWS? b:ccontent
+    {
+        let mut result = a.unwrap_or(Vec::new());
+        result.push(b);
+        result
+    }
+
+CFWS -> Vec<AST<'input>>
+    = CFWS_helper
+    / FWS
+
+CFWS_helper -> Vec<AST<'input>>
+    = head:CFWS_helper_helper+ tail:FWS?
+    {
+        let mut result = Vec::with_capacity(head.len());
+        for mut v in head.into_iter() {
+            result.append(&mut v);
+        }
+        if let Some(mut tail) = tail {
+            result.append(&mut tail);
+        }
+        result
+    }
+
+CFWS_helper_helper -> Vec<AST<'input>>
+    = head:FWS? c:comment
+    {
+        let mut result = head.unwrap_or(vec![]);
+        result.push(c);
+        result
+    }
+
+////// 3.2.3 Atom
+
+atext
+    = ALPHA
+    / DIGIT
+    / "!" / "#"
+    / "$" / "%"
+    / "&" / "'"
+    / "*" / "+"
+    / "-" / "/"
+    / "=" / "?"
+    / "^" / "_"
+    / "`" / "{"
+    / "|" / "}"
+    / "~"
+
+atom -> Vec<AST<'input>>
+    = head:CFWS? b:$(atext+) tail:CFWS?
+    {
+        let mut head = head.unwrap_or(vec![]);
+        head.push(AST::Atom(b));
+        if let Some(mut tail) = tail {
+            head.append(&mut tail);
+        }
+        head
+    }
+
+
+dot_atom_text = atext+ dot_atom_text_helper*
+
+dot_atom_text_helper = "." atext+
+
+dot_atom -> Vec<AST<'input>>
+    = head:CFWS? b:$(dot_atom_text) tail:CFWS?
+    {
+        let mut head = head.unwrap_or(vec![]);
+        head.push(AST::Atom(b));
+        if let Some(mut tail) = tail {
+            head.append(&mut tail)
+        }
+        head
+    }
+
+// Special characters that do not appear in atext
+specials
+    = "(" / ")"
+    / "<" / ">"
+    / "[" / "]"
+    / ":" / ";"
+    / "@" / "\\"
+    / "," / "."
+    / DQUOTE
+
+
+////// 3.2.4 Quoted Strings
+
+// Printable US-ASCII characters not including "\" or the quote character
+qtext -> AST<'input>
+    = qtext:$(qtext_helper+)
+    {
+        AST::Atom(qtext)
+    }
+
+qtext_helper
+    = '\x21'
+    / [\x23-\x5b]
+    / [\x5d-\x7e]
+    / obs_qtext
+
+qcontent -> AST<'input>
+    = qtext / quoted_pair
+
+quoted_string -> Vec<AST<'input>>
+    = a:CFWS? DQUOTE c:quoted_string_helper* d:FWS? DQUOTE f:CFWS?
+    {
+        let mut head = a.unwrap_or(vec![]);
+        let mut inner = Vec::with_capacity(c.len());
+        let mut c = c;
+        for mut v in c.into_iter() {
+            inner.append(&mut v);
+        }
+        if let Some(mut d) = d {
+            inner.append(&mut d);
+        }
+        head.push(AST::QuotedString(inner));
+        if let Some(mut f) = f {
+            head.append(&mut f);
+        }
+        head
+    }
+
+quoted_string_helper -> Vec<AST<'input>>
+    = head:FWS? tail:qcontent
+    {
+        let mut head = head.unwrap_or(vec![]);
+        head.push(tail);
+        head
+    }
+
+////// 3.2.5. Miscellaneous Tokens
+
+word -> Vec<AST<'input>>
+    = atom / quoted_string
+
+////// 4.1. Miscellaneous Obsolete Tokens
+
+obs_NO_WS_CTL
+    = [\x01-\x08]
+    / '\x0b' / '\x0c'
+    / [\x0e-\x1f]
+    / '\x7f'
+
+obs_ctext = obs_NO_WS_CTL
+
+obs_qtext = obs_NO_WS_CTL
+
+obs_qp -> AST<'input>
+    = "\\" a:$(obs_qp_helper)
+    { AST::QuotedPair(a) }
+
+obs_qp_helper
+    = '\x00'
+    / obs_NO_WS_CTL
+    / LF
+    / CR
+
+///// 4.2. Obsolete Folding White Space
+
+obs_FWS -> Vec<AST<'input>>
+    = white_space:$(WSP+) tail:obs_FWS_helper
+    {
+        let mut head = vec![AST::WhiteSpace(white_space)];
+        let mut tail = tail;
+        head.append(&mut tail);
+        head
+    }
+
+obs_FWS_helper -> Vec<AST<'input>>
+    = fold:$(CRLF) white_space:$(WSP+)
+    { vec![AST::Fold(fold), AST::WhiteSpace(white_space)] }
+
+///// 4.4. Obsolete Addressing
+
+obs_local_part -> Vec<AST<'input>>
+    = head:word tail:obs_local_part_helper*
+    {
+        let mut head = head;
+        let mut tail = tail;
+        for mut v in tail.into_iter() {
+            head.append(&mut v);
+        }
+        head
+    }
+
+obs_local_part_helper -> Vec<AST<'input>>
+    = head:$(".") tail:word
+    {
+        let mut head = vec![AST::Atom(head)];
+        let mut tail = tail;
+        head.append(&mut tail);
+        head
+    }
+
+obs_domain -> Vec<AST<'input>>
+    = head:atom tail:obs_domain_helper*
+    {
+        let mut tail = tail;
+        let mut head = head;
+        for mut v in (tail).into_iter() {
+            head.append(&mut v);
+        }
+        head
+    }
+
+obs_domain_helper -> Vec<AST<'input>>
+    = dot:$(".") tail:atom
+    {
+        let mut head = vec![AST::Atom(dot)];
+        let mut tail = tail;
+        head.append(&mut tail);
+        head
+    }
+
+
+///// Lib
+
+CR = '\x0d'
+LF = '\x0a'
+SP = '\x20'
+HTAB = '\x09'
+DQUOTE = '\x22'
+CTL = [\x00-\x1f] / '\x7f'
+CHAR = [\x01-\x7f]
+CRLF = CR LF
+DIGIT = [0-9]
+ALPHA = [a-zA-Z]
+// Visible (printing) characters 0x21-0x7e
+VCHAR = [\x21-\x7e]
+WSP = SP / HTAB
